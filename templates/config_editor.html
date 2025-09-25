@@ -3574,6 +3574,8 @@ document.getElementById('oneKeyDiagnosticButton').addEventListener('click', asyn
                 <li><a href="#" data-target="section-reply-interval">回复间隔配置</a></li>
                 <li><a href="#" data-target="section-memory">临时记忆配置</a></li>
                 <li><a href="#" data-target="section-core-memory">核心记忆管理</a></li>
+                <li><a href="#" data-target="section-file-collection">文件收藏配置</a></li>
+                <li><a href="#" data-target="section-task-management">任务管理与复盘</a></li>
                 <li><a href="#" data-target="section-active-message">主动消息配置</a></li>
                 <li><a href="#" data-target="section-reminders">定时器与提醒</a></li>
                 <li><a href="#" data-target="section-text-commands">指令设置</a></li>
@@ -4136,7 +4138,69 @@ document.getElementById('oneKeyDiagnosticButton').addEventListener('click', asyn
                     </div>
                 </div>
 
-                <div id="section-active-message" class="content-panel">
+                
+                
+                <div id="section-file-collection" class="content-panel">
+                    <h2>文件收藏配置</h2>
+                    <div class="form-group">
+                        <div class="switch-item">
+                            <label>启用文件收藏功能</label>
+                            <div class="switch"><label class="switch-label"><input type="checkbox" name="ENABLE_FILE_COLLECTION" {% if config.ENABLE_FILE_COLLECTION %}checked{% endif %}><span class="slider round"></span></label></div>
+                        </div>
+                        <small>开启后，当你在微信里 @ 机器人并发送文件或图片时，系统会自动分析内容、生成标签并保存到本地。</small>
+                    </div>
+                    <div class="form-group">
+                        <label>文件存储根目录:</label>
+                        <input type="text" name="FILE_COLLECTION_PATH" value="{{ config.FILE_COLLECTION_PATH }}">
+                        <small>默认使用 {{ config.FILE_COLLECTION_PATH }}。支持相对路径，例如 <code>./收藏文件</code>。</small>
+                    </div>
+                    <div class="form-group">
+                        <label>允许的最大文件大小 (MB):</label>
+                        <input type="number" step="0.1" min="1" name="MAX_FILE_SIZE_MB" value="{{ config.MAX_FILE_SIZE_MB }}">
+                    </div>
+                    <div class="form-group">
+                        <label>支持的文件类型 (逗号或换行分隔):</label>
+                        <textarea name="SUPPORTED_FILE_TYPES" rows="3" placeholder=".pdf, .docx, .png">{{ config.SUPPORTED_FILE_TYPES | join(', ') }}</textarea>
+                        <small>请确保前面带有点号，例如 <code>.pdf</code>、<code>.pptx</code>。</small>
+                    </div>
+                </div>
+
+                <div id="section-task-management" class="content-panel">
+                    <h2>任务管理与复盘</h2>
+                    <div class="form-group">
+                        <div class="switch-item">
+                            <label>启用任务记录功能</label>
+                            <div class="switch"><label class="switch-label"><input type="checkbox" name="ENABLE_TASK_MANAGEMENT" {% if config.ENABLE_TASK_MANAGEMENT %}checked{% endif %}><span class="slider round"></span></label></div>
+                        </div>
+                        <small>开启后，指定的任务记录群里发送的待办内容会自动识别并入库。</small>
+                    </div>
+                    <div class="form-group">
+                        <label>任务记录群列表 (每行一个群名):</label>
+                        <textarea name="TASK_RECORD_GROUPS" rows="3" placeholder="任务记录群1&#10;任务记录群2">{{ config.TASK_RECORD_GROUPS | join('\n') }}</textarea>
+                        <small>请填写微信群聊的完整名称，需与实际群名完全一致。</small>
+                    </div>
+                    <hr style="margin:20px 0;">
+                    <div class="form-group">
+                        <div class="switch-item">
+                            <label>启用每日复盘</label>
+                            <div class="switch"><label class="switch-label"><input type="checkbox" name="ENABLE_DAILY_REVIEW" {% if config.ENABLE_DAILY_REVIEW %}checked{% endif %}><span class="slider round"></span></label></div>
+                        </div>
+                        <small>到达设定时间后会在上述任务群中自动输出复盘图表与总结。</small>
+                    </div>
+                    <div class="form-group">
+                        <label>复盘推送时间:</label>
+                        <input type="time" name="DAILY_REVIEW_TIME" value="{{ config.DAILY_REVIEW_TIME }}">
+                    </div>
+                    <div class="form-group">
+                        <div class="switch-item">
+                            <label>复盘后自动归档已完成任务</label>
+                            <div class="switch"><label class="switch-label"><input type="checkbox" name="AUTO_ARCHIVE_COMPLETED_TASKS" {% if config.AUTO_ARCHIVE_COMPLETED_TASKS %}checked{% endif %}><span class="slider round"></span></label></div>
+                        </div>
+                        <small>复盘成功后会自动将状态为已完成或已取消的任务标记为归档。</small>
+                    </div>
+                </div>
+
+<div id="section-active-message" class="content-panel">
                     <h2>主动消息配置</h2>
                     <div class="form-group">
                         <div class="switch-item">
@@ -4913,3 +4977,5 @@ document.getElementById('oneKeyDiagnosticButton').addEventListener('click', asyn
 
 </body>
 </html>
+
+

@@ -419,7 +419,9 @@ def submit_config():
             'ENABLE_GROUP_AT_REPLY', 'ENABLE_GROUP_KEYWORD_REPLY','GROUP_KEYWORD_REPLY_IGNORE_PROBABILITY', 'REMOVE_PARENTHESES',
             'ENABLE_ASSISTANT_MODEL', 'USE_ASSISTANT_FOR_MEMORY_SUMMARY', 'ENABLE_FORUM_CUSTOM_MODEL',
             'IGNORE_GROUP_CHAT_FOR_AUTO_MESSAGE', 'ENABLE_SENSITIVE_CONTENT_CLEARING', 'SAVE_MEMORY_TO_SEPARATE_FILE',
-            'ENABLE_TEXT_COMMANDS'
+            'ENABLE_TEXT_COMMANDS',
+            'ENABLE_FILE_COLLECTION', 'ENABLE_TASK_MANAGEMENT',
+            'ENABLE_DAILY_REVIEW', 'AUTO_ARCHIVE_COMPLETED_TASKS'
         ]
         for field in boolean_fields:
             new_values_for_config_py[field] = field in request.form
@@ -935,6 +937,14 @@ def index():
                         new_values[var] = original_value # 保留旧值
                         app.logger.warning(f"配置项 {var} 的值 '{value_from_form}' 无法转换为浮点数，已保留旧值。错误: {e}")
 
+                elif isinstance(original_value, list):
+                    if value_from_form:
+                        parts = re.split(r'[\n,]+', value_from_form)
+                        cleaned = [item.strip() for item in parts if item.strip()]
+                        new_values[var] = cleaned
+                    else:
+                        new_values[var] = []
+
                 elif original_value is None and value_from_form: # 如果原配置中某项不存在 (None), 但表单提交了值
                      # 尝试推断类型或默认为字符串
                     try:
@@ -945,16 +955,7 @@ def index():
                     new_values[var] = value_from_form
             
             # 再次检查布尔字段，确保未勾选时为 False
-            boolean_fields_from_editor = [
-                'ENABLE_IMAGE_RECOGNITION', 'ENABLE_EMOJI_RECOGNITION',
-                'ENABLE_EMOJI_SENDING', 'ENABLE_AUTO_MESSAGE', 'ENABLE_MEMORY',
-                'UPLOAD_MEMORY_TO_AI', 'ENABLE_LOGIN_PASSWORD', 'ENABLE_REMINDERS',
-                'ALLOW_REMINDERS_IN_QUIET_TIME', 'USE_VOICE_CALL_FOR_REMINDERS',
-                'ENABLE_ONLINE_API', 'SEPARATE_ROW_SYMBOLS','ENABLE_SCHEDULED_RESTART',
-                'ENABLE_GROUP_AT_REPLY', 'ENABLE_GROUP_KEYWORD_REPLY','GROUP_KEYWORD_REPLY_IGNORE_PROBABILITY','REMOVE_PARENTHESES',
-                'ENABLE_ASSISTANT_MODEL', 'USE_ASSISTANT_FOR_MEMORY_SUMMARY',
-                'IGNORE_GROUP_CHAT_FOR_AUTO_MESSAGE', 'ENABLE_SENSITIVE_CONTENT_CLEARING', 'SAVE_MEMORY_TO_SEPARATE_FILE'
-            ]
+            boolean_fields_from_editor = ['ENABLE_IMAGE_RECOGNITION', 'ENABLE_EMOJI_RECOGNITION', 'ENABLE_EMOJI_SENDING', 'ENABLE_AUTO_MESSAGE', 'ENABLE_MEMORY', 'UPLOAD_MEMORY_TO_AI', 'ENABLE_LOGIN_PASSWORD', 'ENABLE_REMINDERS', 'ALLOW_REMINDERS_IN_QUIET_TIME', 'USE_VOICE_CALL_FOR_REMINDERS', 'ENABLE_ONLINE_API', 'SEPARATE_ROW_SYMBOLS', 'ENABLE_SCHEDULED_RESTART', 'ENABLE_GROUP_AT_REPLY', 'ENABLE_GROUP_KEYWORD_REPLY', 'GROUP_KEYWORD_REPLY_IGNORE_PROBABILITY', 'REMOVE_PARENTHESES', 'ENABLE_ASSISTANT_MODEL', 'USE_ASSISTANT_FOR_MEMORY_SUMMARY', 'IGNORE_GROUP_CHAT_FOR_AUTO_MESSAGE', 'ENABLE_SENSITIVE_CONTENT_CLEARING', 'SAVE_MEMORY_TO_SEPARATE_FILE', 'ENABLE_FILE_COLLECTION', 'ENABLE_TASK_MANAGEMENT', 'ENABLE_DAILY_REVIEW', 'AUTO_ARCHIVE_COMPLETED_TASKS']
             for field in boolean_fields_from_editor:
                  # 确保这些字段在表单中存在才处理，否则它们可能来自 quick_start
                 if field in request.form or field not in new_values: # 如果在表单中，或尚未设置

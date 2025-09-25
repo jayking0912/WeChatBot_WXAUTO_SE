@@ -1,0 +1,8 @@
+__pycache__/
+CoreMemory/
+data/
+dist/
+mcp-chrome-extension/
+Memory_Temp/
+chat_contexts.json
+*.spec

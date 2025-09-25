@@ -155,9 +155,69 @@ ENABLE_SENSITIVE_CONTENT_CLEARING = True
 # 论坛自定义模型配置（可选）
 ENABLE_FORUM_CUSTOM_MODEL = False
 FORUM_BASE_URL = 'https://vg.v1api.cc/v1'
-FORUM_MODEL = ''
+FORUM_MODEL = 'deepseek-ai/DeepSeek-V3'
 FORUM_API_KEY = ''
 FORUM_TEMPERATURE = 1.0
 FORUM_MAX_TOKEN = 1200
+
+# ============ 文件收藏和任务管理功能配置 ============
+
+# 文件收藏功能配置
+ENABLE_FILE_COLLECTION = True
+FILE_COLLECTION_PATH = '收藏文件'
+MAX_FILE_SIZE_MB = 500
+SUPPORTED_FILE_TYPES = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt']
+
+# 任务记录功能配置
+ENABLE_TASK_MANAGEMENT = True
+TASK_RECORD_GROUPS = ['任务记录群']
+
+# 复盘功能配置
+ENABLE_DAILY_REVIEW = False
+DAILY_REVIEW_TIME = '08:00'
+AUTO_ARCHIVE_COMPLETED_TASKS = False
+
+# 文件标签生成提示词
+FILE_ANALYSIS_PROMPT = """请分析这个文件的内容，提取关键信息并以JSON格式返回：
+{
+    "客户": "客户名称或项目名称（如果能识别出来）",
+    "内容": "文件主要内容的简短描述",
+    "日期": "文件中涉及的时间信息（如果有）",
+    "类型": "文件类型分类：技术文档/合同协议/产品资料/会议记录/图片资料/其他",
+    "关键词": ["关键词1", "关键词2", "关键词3"],
+    "重要性": "高/中/低"
+}
+
+请根据文件实际内容填写，如果某项信息无法确定，请填写"未知"。"""
+
+# 任务优先级分析提示词
+TASK_ANALYSIS_PROMPT = """请分析以下任务列表，为每个任务评估重要性(1-5)和紧急度(1-5)，并生成四象限分析。
+
+任务列表：
+{tasks}
+
+请以JSON格式返回：
+{
+    "task_analysis": [
+        {
+            "task_id": 1,
+            "content": "任务内容",
+            "priority": 4,
+            "urgency": 3,
+            "quadrant": "重要不紧急"
+        }
+    ],
+    "summary": "整体分析总结"
+}
+
+四象限分类：
+- 重要紧急：priority>=4 且 urgency>=4
+- 重要不紧急：priority>=4 且 urgency<4
+- 不重要紧急：priority<4 且 urgency>=4
+- 不重要不紧急：priority<4 且 urgency<4"""
+
+# 文件搜索关键词识别
+FILE_SEARCH_KEYWORDS = ["查找", "搜索", "找一下", "帮我找", "有没有", "查一下", "搜一下"]
+TASK_COMPLETION_KEYWORDS = ["完成", "取消", "结束", "搞定", "做完了", "cancel", "done"]
 
 

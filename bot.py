@@ -43,9 +43,31 @@ except ImportError:
     except ImportError:
         from wxauto import WeChat
 
+# 初始化logger - 必须在其他模块导入之前
+logger = logging.getLogger()
+
+# 导入新功能模块
+try:
+    from database import init_database
+    from file_manager import process_file_collection_request, get_file_manager
+    from task_manager import process_task_message, get_task_summary, get_task_manager
+    from quadrant_analyzer import generate_task_review_chart, get_quadrant_analyzer
+    logger.info("新功能模块导入成功")
+except ImportError as e:
+    logger.warning(f"新功能模块导入失败: {e}")
+    # 定义空函数以避免错误
+    def init_database(): pass
+    def process_file_collection_request(*args): return False, "功能未启用"
+    def process_task_message(*args): return False, "", []
+    def get_task_summary(*args): return "功能未启用"
+    def generate_task_review_chart(*args): return "", "", "功能未启用"
+
 # 生成用户昵称列表和prompt映射字典
 user_names = [entry[0] for entry in LISTEN_LIST]
 prompt_mapping = {entry[0]: entry[1] for entry in LISTEN_LIST}
+
+# 用户搜索结果存储
+user_search_results = {}
 
 # 编码检测和处理辅助函数
 def safe_read_file_with_encoding(file_path, fallback_content=""):
@@ -126,6 +148,28 @@ wait = 1  # 设置1秒查看一次是否有新消息
 
 # 获取程序根目录
 root_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Cache downloaded media so 收藏 commands can access recent files
+RECENT_MEDIA_CACHE_DIR = os.path.join(root_dir, 'wxauto_media_cache')
+RECENT_MEDIA_EXPIRATION_SECONDS = 5 * 60
+recent_media_cache = {}
+recent_media_lock = threading.Lock()
+try:
+    os.makedirs(RECENT_MEDIA_CACHE_DIR, exist_ok=True)
+except Exception as cache_dir_err:
+    logger.warning(f'无法创建媒体缓存目录: {cache_dir_err}')
+else:
+    try:
+        for name in os.listdir(RECENT_MEDIA_CACHE_DIR):
+            stale_path = os.path.join(RECENT_MEDIA_CACHE_DIR, name)
+            if os.path.isfile(stale_path):
+                try:
+                    os.remove(stale_path)
+                except Exception:
+                    logger.debug(f'无法清理历史缓存文件: {stale_path}')
+    except Exception as cleanup_err:
+        logger.debug(f'初始化清理媒体缓存失败: {cleanup_err}')
+
 
 # 动态配置获取函数
 def get_dynamic_config(key, default_value=None):
@@ -420,7 +464,6 @@ async_http_handler = AsyncHTTPHandler(
 async_http_handler.setFormatter(formatter)
 
 # 配置根Logger
-logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 logger.handlers.clear()
 
@@ -1143,6 +1186,151 @@ def call_assistant_api_with_retry(messages_to_send, user_id, max_retries=2, is_s
 
     raise RuntimeError("抱歉，辅助模型现在有点忙，稍后再试吧。")
 
+def call_auxiliary_api_with_retry(prompt, task_type="auxiliary", max_retries=2, store_context=False):
+    """
+    调用辅助 API 并在第一次失败或返回空结果时重试。
+    专门用于文件分析、任务分析等辅助功能。
+
+    参数:
+        prompt (str): 要发送给 API 的提示词。
+        task_type (str): 任务类型，用于日志记录。
+        max_retries (int): 最大重试次数。
+        store_context (bool): 是否存储上下文。
+
+    返回:
+        str: API 返回的文本回复。
+    """
+    if _is_base_url_untrusted(DEEPSEEK_BASE_URL):
+        logger.error("抱歉，您所使用的API服务商不受信任，请联系网站管理员")
+        raise RuntimeError("抱歉，您所使用的API服务商不受信任，请联系网站管理员")
+
+    messages_to_send = [{"role": "user", "content": prompt}]
+
+    attempt = 0
+    while attempt <= max_retries:
+        try:
+            logger.debug(f"发送给辅助 API 的消息 ({task_type}): {prompt[:200]}...")
+
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=messages_to_send,
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKEN,
+                stream=False
+            )
+
+            if response.choices:
+                message_content = response.choices[0].message.content
+                if message_content is None:
+                    logger.error(f"辅助API返回了空的信息，可能是因为触发了安全检查机制 ({task_type})")
+                    logger.error(f"错误请求消息体模型: {MODEL}")
+                else:
+                    content = message_content.strip()
+                    if content and "[image]" not in content and content != "ext":
+                        filtered_content = strip_before_thought_tags(content)
+                        if filtered_content:
+                            logger.info(f"辅助API调用成功 ({task_type})")
+                            return filtered_content
+            else:
+                logger.error(f"辅助API返回了空的选择项 ({task_type})")
+
+        except Exception as e:
+            error_info = str(e)
+            logger.error(f"辅助API调用失败：第 {attempt + 1} 次调用失败 ({task_type}) 原因: {error_info}", exc_info=False)
+
+            # 细化错误分类
+            if "real name verification" in error_info:
+                logger.error("\033[31m错误：API 服务商反馈请完成实名认证后再使用！\033[0m")
+                break
+            elif "rate limit" in error_info:
+                logger.error("\033[31m错误：API 服务商反馈当前访问 API 服务频次达到上限，请稍后再试！\033[0m")
+            elif "payment required" in error_info:
+                logger.error("\033[31m错误：API 服务商反馈您正在使用付费模型，请先充值再使用或使用免费额度模型！\033[0m")
+                break
+            elif "user quota" in error_info or "is not enough" in error_info or "UnlimitedQuota" in error_info:
+                logger.error("\033[31m错误：API 服务商反馈，你的余额不足，请先充值再使用! 如有余额，请检查令牌是否为无限额度。\033[0m")
+                break
+            elif "Api key is invalid" in error_info:
+                logger.error("\033[31m错误：API 服务商反馈 API KEY 不可用，请检查配置选项！\033[0m")
+            elif "service unavailable" in error_info:
+                logger.error("\033[31m错误：API 服务商反馈服务器繁忙，请稍后再试！\033[0m")
+            elif "sensitive words detected" in error_info:
+                logger.error("\033[31m错误：提示词中含有敏感词，无法生成回复，请联系API服务商！\033[0m")
+                break
+            else:
+                logger.error("\033[31m未知错误：" + error_info + "\033[0m")
+
+        attempt += 1
+
+    logger.warning(f"辅助API调用失败，返回默认结果 ({task_type})")
+    return f"辅助分析暂时不可用，请稍后再试。任务类型：{task_type}"
+
+def store_user_search_results(username: str, search_results: list):
+    """存储用户的搜索结果"""
+    global user_search_results
+    user_search_results[username] = search_results
+    logger.info(f"为用户 {username} 存储了 {len(search_results)} 个搜索结果")
+
+def send_selected_file(username: str, file_number: int) -> bool:
+    """发送用户选择的文件"""
+    global user_search_results
+
+    try:
+        if username not in user_search_results:
+            logger.warning(f"用户 {username} 没有搜索历史")
+            return False
+
+        search_results = user_search_results[username]
+
+        if file_number < 1 or file_number > len(search_results):
+            logger.warning(f"用户 {username} 选择的文件编号 {file_number} 超出范围")
+            return False
+
+        selected_file = search_results[file_number - 1]
+        file_path = selected_file['storage_path']
+
+        if not os.path.exists(file_path):
+            logger.error(f"文件不存在: {file_path}")
+            return False
+
+        # 发送文件
+        wx.SendFile(filepath=file_path, who=username)
+        logger.info(f"成功发送文件给用户 {username}: {selected_file['file_name']}")
+        return True
+
+    except Exception as e:
+        logger.error(f"发送文件失败: {e}")
+        return False
+
+def trigger_daily_review(group_name: str):
+    """自动触发每日复盘"""
+    try:
+        logger.info(f"开始为群组 {group_name} 执行自动复盘")
+
+        # 生成任务复盘图表
+        chart_path, summary_path, analysis_text = generate_task_review_chart(group_name)
+
+        if summary_path and os.path.exists(summary_path):
+            # 发送复盘图片到群组
+            try:
+                wx.SendFile(filepath=summary_path, who=group_name)
+                success_text = f'📊 {group_name} 每日复盘报告已自动生成！\n\n{analysis_text}'
+                logger.info(f"成功发送复盘图片到群组: {group_name}")
+            except Exception as e:
+                logger.warning(f"发送复盘图片到群组失败: {e}")
+                success_text = f'📊 {group_name} 每日复盘分析完成：\n\n{analysis_text}'
+        else:
+            success_text = f'📊 {group_name} 每日复盘分析完成：\n\n{analysis_text}'
+
+        # 发送复盘结果到群组
+        send_reply(group_name, group_name, group_name, "[每日自动复盘]", success_text, is_system_message=True)
+        logger.info(f"已完成群组 {group_name} 的自动复盘")
+
+    except Exception as e:
+        logger.error(f"自动复盘处理失败 (群组: {group_name}): {e}")
+        error_text = f"📊 {group_name} 每日复盘自动生成失败，请手动发送\"开始复盘\"来生成复盘报告。"
+        send_reply(group_name, group_name, group_name, "[每日自动复盘]", error_text, is_system_message=True)
+
 def keep_alive():
     """
     定期检查监听列表，确保所有在 user_names 中的用户都被持续监听。
@@ -1663,6 +1851,8 @@ def _handle_text_command_if_any(original_content: str, user_id: str) -> bool:
     /允许语音通话 或 /ev - 允许使用语音通话提醒
     /禁止语音通话 或 /dv - 禁止使用语音通话提醒
     /总结 或 /ms - 立即进行一次临时记忆总结成记忆片段
+    /任务复盘 或 /tr - 生成任务优先级复盘报告和四象限图表
+    /文件统计 或 /fs - 查看文件收藏统计信息
     """
     try:
         # 动态检查文本命令开关
@@ -1728,17 +1918,85 @@ def _handle_text_command_if_any(original_content: str, user_id: str) -> bool:
                 reply_text = '正在进行记忆总结，请稍后...'
                 command_label = '[命令]/总结' if normalized == '/总结' else '[命令]/ms'
                 send_reply(user_id, user_id, user_id, command_label, reply_text, is_system_message=True)
-                
+
                 # 调用记忆总结功能，跳过记忆条目检查
                 summarize_and_save(user_id, skip_check=True)
-                
+
                 # 发送完成消息
                 success_text = '记忆总结已完成，记忆片段已保存。'
                 send_reply(user_id, user_id, user_id, command_label, success_text, is_system_message=True)
-                
+
             except Exception as e:
                 logger.error(f"执行记忆总结失败: {e}")
                 error_text = '记忆总结失败，请稍后再试。'
+                send_reply(user_id, user_id, user_id, command_label, error_text, is_system_message=True)
+            return True
+
+        # 新功能命令
+        if normalized == '/任务复盘' or normalized == '/tr':
+            try:
+                reply_text = '正在生成任务复盘报告，请稍后...'
+                command_label = '[命令]/任务复盘' if normalized == '/任务复盘' else '[命令]/tr'
+                send_reply(user_id, user_id, user_id, command_label, reply_text, is_system_message=True)
+
+                # 生成任务复盘图表
+                chart_path, summary_path, analysis_text = generate_task_review_chart(user_id)
+
+                if summary_path and os.path.exists(summary_path):
+                    # 发送复盘图片
+                    try:
+                        wx.SendFile(filepath=summary_path, who=user_id)
+                        success_text = f'任务复盘报告已生成！\n\n{analysis_text}'
+                    except Exception as e:
+                        logger.warning(f"发送复盘图片失败: {e}")
+                        success_text = f'任务复盘分析完成：\n\n{analysis_text}'
+                else:
+                    success_text = f'任务复盘分析完成：\n\n{analysis_text}'
+
+                send_reply(user_id, user_id, user_id, command_label, success_text, is_system_message=True)
+
+            except Exception as e:
+                logger.error(f"任务复盘失败: {e}")
+                error_text = '任务复盘失败，请稍后再试。'
+                send_reply(user_id, user_id, user_id, command_label, error_text, is_system_message=True)
+            return True
+
+        if normalized == '/文件统计' or normalized == '/fs':
+            try:
+                from database import get_db_manager
+                db_manager = get_db_manager()
+
+                # 获取用户的文件统计
+                files = db_manager.search_files("", user_id)
+
+                if files:
+                    # 按类型统计
+                    type_count = {}
+                    for file in files:
+                        file_type = file['file_type']
+                        type_count[file_type] = type_count.get(file_type, 0) + 1
+
+                    stats_text = f"📊 您的文件收藏统计：\n\n"
+                    stats_text += f"总文件数: {len(files)}\n\n"
+                    stats_text += "文件类型分布:\n"
+                    for file_type, count in type_count.items():
+                        stats_text += f"  • {file_type}: {count} 个\n"
+
+                    # 显示最近的文件
+                    stats_text += f"\n📄 最近收藏的文件 (前5个):\n"
+                    for i, file in enumerate(files[:5], 1):
+                        stats_text += f"{i}. {file['file_name']}\n"
+
+                else:
+                    stats_text = "📊 您还没有收藏任何文件"
+
+                command_label = '[命令]/文件统计' if normalized == '/文件统计' else '[命令]/fs'
+                send_reply(user_id, user_id, user_id, command_label, stats_text, is_system_message=True)
+
+            except Exception as e:
+                logger.error(f"文件统计失败: {e}")
+                error_text = '文件统计失败，请稍后再试。'
+                command_label = '[命令]/文件统计' if normalized == '/文件统计' else '[命令]/fs'
                 send_reply(user_id, user_id, user_id, command_label, error_text, is_system_message=True)
             return True
 
@@ -1757,6 +2015,7 @@ def handle_wxauto_message(msg, who):
     try:
         last_received_message_timestamp = time.time()
         username = who
+        _prune_expired_media_cache()
         # 获取原始消息内容
         original_content = getattr(msg, 'content', None) or getattr(msg, 'text', None)
 
@@ -1854,10 +2113,13 @@ def handle_wxauto_message(msg, who):
             logger.info(f"开始识别图片/表情 - 用户 {username}: {img_path}")
             # 调用识别函数
             recognized_text = recognize_image_with_moonshot(img_path, is_emoji=is_emoji)
-            # 使用识别结果或回退占位符更新 processed_content
-            processed_content = recognized_text if recognized_text else ("[图片]" if not is_emoji else "[动画表情]")
+            # 使用识别文本替换 processed_content
+            processed_content = recognized_text if recognized_text else ("[图片]" if not is_emoji else "[表情包]")
+            cached_media_path = cache_recent_media(username, img_path)
+            if cached_media_path:
+                img_path = cached_media_path
             clean_up_temp_files() # 清理临时截图文件
-            can_send_messages = True # 确保识别后可以发送消息
+            can_send_messages = True # 确保识别完成后可以发送消息
             logger.info(f"图片/表情识别完成，结果: {processed_content}")
 
         # --- 3. 链接内容获取 (仅当ENABLE_URL_FETCHING为True且当前非图片/表情处理流程时) ---
@@ -1885,10 +2147,138 @@ def handle_wxauto_message(msg, who):
                     # 如果抓取失败，processed_content 保持不变（可能是原始文本，或图片/表情占位符）
             # else: (如果没找到URL) 不需要操作，继续使用当前的 processed_content
 
-        # --- 4. 记录用户消息到记忆 (如果启用) ---
+        # --- 4. 新功能处理：文件收藏和任务管理 ---
+        try:
+            new_functionality_handled = False
+
+            # 4.1 文件收藏处理
+            candidate_collection_path = None
+            if processed_content and "@" in original_content:
+                if img_path and os.path.exists(img_path):
+                    candidate_collection_path = img_path
+                else:
+                    candidate_collection_path = get_cached_media_path(username)
+            if candidate_collection_path and processed_content and "@" in original_content:
+                logger.info(f"检测到可能的文件收藏请求: {username}")
+                success, message = process_file_collection_request(candidate_collection_path, username, who)
+                if success:
+                    send_reply(username, username, username, "[文件收藏]", message, is_system_message=True)
+                    clear_cached_media(username)
+                    new_functionality_handled = True
+                    logger.info(f"文件收藏处理完成: {username}")
+                else:
+                    logger.warning(f"文件收藏处理失败: {message}")
+
+            # 4.2 任务管理处理
+            if not new_functionality_handled and processed_content:
+                # 尝试处理任务相关消息
+                is_task_msg, task_response, task_ids = process_task_message(processed_content, username, who)
+                if is_task_msg and task_response:
+                    # 发送任务处理结果
+                    send_reply(username, username, username, "[任务管理]", task_response, is_system_message=True)
+                    new_functionality_handled = True
+                    logger.info(f"任务管理处理完成: {username}")
+
+            # 4.3 文件搜索处理
+            if not new_functionality_handled and processed_content:
+                # 检查是否为文件搜索请求
+                search_keywords = FILE_SEARCH_KEYWORDS
+                if any(keyword in processed_content for keyword in search_keywords):
+                    logger.info(f"检测到文件搜索请求: {username}")
+                    try:
+                        from database import get_db_manager
+                        db_manager = get_db_manager()
+
+                        # 检查是否为编号选择（如"发送文件1"、"1"等）
+                        if re.match(r'^(发送文件|文件)?(\d+)$', processed_content.strip()):
+                            file_number = int(re.search(r'(\d+)', processed_content).group(1))
+                            success = send_selected_file(username, file_number)
+                            if success:
+                                send_reply(username, username, username, "[文件发送]", f"✅ 已发送文件 {file_number}", is_system_message=True)
+                            else:
+                                send_reply(username, username, username, "[文件发送]", f"❌ 发送文件 {file_number} 失败，请检查编号是否正确", is_system_message=True)
+                            new_functionality_handled = True
+                        else:
+                            # 提取搜索关键词
+                            query = processed_content.replace("查找", "").replace("搜索", "").replace("找一下", "").replace("帮我找", "").replace("有没有", "").replace("查一下", "").replace("搜一下", "").strip()
+                            if query:
+                                search_results = db_manager.search_files(query, username)
+                                if search_results:
+                                    # 存储搜索结果到用户会话
+                                    store_user_search_results(username, search_results)
+
+                                    result_text = f"🔍 找到 {len(search_results)} 个相关文件：\n\n"
+                                    for i, file in enumerate(search_results[:10], 1):
+                                        result_text += f"{i}. {file['file_name']}\n"
+                                        result_text += f"   类型: {file['file_type']}\n"
+                                        result_text += f"   时间: {file['upload_time']}\n\n"
+
+                                    if len(search_results) > 10:
+                                        result_text += f"... 还有 {len(search_results) - 10} 个文件\n\n"
+
+                                    result_text += "💡 发送数字编号即可获取对应文件，如：发送\"1\"获取第1个文件"
+                                else:
+                                    result_text = f"🔍 未找到与 '{query}' 相关的文件"
+
+                                send_reply(username, username, username, "[文件搜索]", result_text, is_system_message=True)
+                                new_functionality_handled = True
+                    except Exception as e:
+                        logger.error(f"文件搜索处理失败: {e}")
+
+            # 4.4 复盘响应处理
+            if not new_functionality_handled and processed_content:
+                # 检查是否为复盘响应
+                if "开始复盘" in processed_content or "复盘" in processed_content:
+                    logger.info(f"检测到复盘请求: {username}")
+                    try:
+                        # 生成任务复盘图表
+                        chart_path, summary_path, analysis_text = generate_task_review_chart(who)
+
+                        if summary_path and os.path.exists(summary_path):
+                            # 发送复盘图片
+                            try:
+                                wx.SendFile(filepath=summary_path, who=username)
+                                success_text = f'📊 任务复盘报告已生成！\n\n{analysis_text}'
+                            except Exception as e:
+                                logger.warning(f"发送复盘图片失败: {e}")
+                                success_text = f'📊 任务复盘分析完成：\n\n{analysis_text}'
+                        else:
+                            success_text = f'📊 任务复盘分析完成：\n\n{analysis_text}'
+
+                        send_reply(username, username, username, "[每日复盘]", success_text, is_system_message=True)
+                        new_functionality_handled = True
+
+                    except Exception as e:
+                        logger.error(f"复盘处理失败: {e}")
+                        send_reply(username, username, username, "[每日复盘]", "复盘生成失败，请稍后再试。", is_system_message=True)
+                        new_functionality_handled = True
+
+            # 4.5 任务查询处理
+            if not new_functionality_handled and processed_content:
+                # 检查是否为任务查询请求
+                review_keywords = ["任务", "总结", "进度", "待办"]
+                if any(keyword in processed_content for keyword in review_keywords) and len(processed_content) < 20:
+                    logger.info(f"检测到任务查询请求: {username}")
+                    try:
+                        task_summary = get_task_summary(who)
+                        if task_summary and "功能未启用" not in task_summary:
+                            send_reply(username, username, username, "[任务查询]", task_summary, is_system_message=True)
+                            new_functionality_handled = True
+                    except Exception as e:
+                        logger.error(f"任务查询处理失败: {e}")
+
+            # 如果新功能已处理，则不需要继续AI聊天流程
+            if new_functionality_handled:
+                logger.info(f"新功能已处理消息，跳过AI聊天流程: {username}")
+                return
+
+        except Exception as e:
+            logger.error(f"新功能处理失败: {e}")
+
+        # --- 5. 记录用户消息到记忆 (如果启用) ---
         log_user_message_to_memory(username, processed_content)
 
-        # --- 5. 将最终处理后的消息加入队列 ---
+        # --- 6. 将最终处理后的消息加入队列 ---
         # 只有在 processed_content 有效时才加入队列
         if processed_content:
             # 获取当前时间戳，添加到消息内容前
@@ -2486,6 +2876,83 @@ def sanitize_user_id_for_filename(user_id):
             safe_name = safe_name[:50]
     
     return safe_name
+
+def _prune_expired_media_cache():
+    now = time.time()
+    expired = []
+    with recent_media_lock:
+        for conv_id, info in list(recent_media_cache.items()):
+            path = info.get('path')
+            timestamp = info.get('timestamp', 0)
+            if not path or not os.path.exists(path) or now - timestamp > RECENT_MEDIA_EXPIRATION_SECONDS:
+                expired.append(conv_id)
+        for conv_id in expired:
+            info = recent_media_cache.pop(conv_id, None)
+            if not info:
+                continue
+            cached_path = info.get('path')
+            if cached_path and os.path.exists(cached_path):
+                try:
+                    os.remove(cached_path)
+                except Exception as err:
+                    logger.debug(f'清理过期媒体缓存失败: {cached_path} ({err})')
+
+
+def cache_recent_media(conversation_id: str, source_path: str) -> Optional[str]:
+    if not source_path or not os.path.exists(source_path):
+        return None
+    _prune_expired_media_cache()
+    try:
+        os.makedirs(RECENT_MEDIA_CACHE_DIR, exist_ok=True)
+        ext = os.path.splitext(source_path)[1] or '.jpg'
+        safe_name = sanitize_user_id_for_filename(conversation_id)
+        timestamp_str = datetime.now().strftime('%Y%m%d%H%M%S')
+        cached_name = f'{safe_name}_{timestamp_str}{ext}'
+        cached_path = os.path.join(RECENT_MEDIA_CACHE_DIR, cached_name)
+        shutil.copy2(source_path, cached_path)
+        with recent_media_lock:
+            previous = recent_media_cache.get(conversation_id)
+            recent_media_cache[conversation_id] = {'path': cached_path, 'timestamp': time.time()}
+        if previous:
+            old_path = previous.get('path')
+            if old_path and old_path != cached_path and os.path.exists(old_path):
+                try:
+                    os.remove(old_path)
+                except Exception as cleanup_err:
+                    logger.debug(f'无法删除旧的媒体缓存: {cleanup_err}')
+        logger.info(f'缓存可收藏的媒体文件: {cached_path}')
+        return cached_path
+    except Exception as err:
+        logger.warning(f'缓存媒体失败 ({conversation_id}): {err}')
+        return None
+
+
+def get_cached_media_path(conversation_id: str) -> Optional[str]:
+    _prune_expired_media_cache()
+    with recent_media_lock:
+        info = recent_media_cache.get(conversation_id)
+        if not info:
+            return None
+        path = info.get('path')
+        if path and os.path.exists(path):
+            info['timestamp'] = time.time()
+            return path
+        recent_media_cache.pop(conversation_id, None)
+    return None
+
+
+def clear_cached_media(conversation_id: str):
+    with recent_media_lock:
+        info = recent_media_cache.pop(conversation_id, None)
+    if not info:
+        return
+    cached_path = info.get('path')
+    if cached_path and os.path.exists(cached_path):
+        try:
+            os.remove(cached_path)
+        except Exception as err:
+            logger.debug(f'无法移除媒体缓存文件: {cached_path} ({err})')
+
 
 def get_core_memory_file_path(user_id):
     """获取核心记忆JSON文件的路径"""
@@ -3559,6 +4026,46 @@ def log_ai_reply_to_memory(username, reply_part):
     except Exception as log_err:
         logger.error(f"记录 AI 回复到记忆日志失败，用户 {username}: {log_err}")
 
+def setup_daily_review_reminders():
+    """设置每日复盘提醒"""
+    try:
+        if not ENABLE_DAILY_REVIEW:
+            return
+
+        # 为每个任务记录群的用户添加每日复盘提醒
+        review_time = DAILY_REVIEW_TIME
+        for group_name in TASK_RECORD_GROUPS:
+            # 检查是否已经存在复盘提醒
+            existing_reminder = None
+            with recurring_reminder_lock:
+                for reminder in recurring_reminders:
+                    if (reminder.get('reminder_type') == 'recurring' and
+                        reminder.get('time_str') == review_time and
+                        '任务复盘' in reminder.get('content', '')):
+                        existing_reminder = reminder
+                        break
+
+            if not existing_reminder:
+                # 为这个群组添加自动复盘提醒
+                new_reminder = {
+                    'reminder_type': 'recurring',
+                    'user_id': group_name,  # 使用群组名作为用户ID
+                    'time_str': review_time,
+                    'content': f'__AUTO_DAILY_REVIEW__{group_name}',  # 特殊标识用于自动触发复盘
+                    'auto_trigger': True  # 标记为自动触发类型
+                }
+
+                with recurring_reminder_lock:
+                    recurring_reminders.append(new_reminder)
+
+                logger.info(f"为群组 {group_name} 设置每日复盘提醒: {review_time}")
+
+        # 保存更新后的提醒列表
+        save_recurring_reminders()
+
+    except Exception as e:
+        logger.error(f"设置每日复盘提醒失败: {e}")
+
 def load_recurring_reminders():
     """从 JSON 文件加载重复和长期一次性提醒到内存中。"""
     global recurring_reminders
@@ -3714,6 +4221,13 @@ def recurring_reminder_checker():
                             content = reminder['content']
                             reminder_type = reminder['reminder_type'] # 获取类型用于日志和提示
                             logger.info(f"正在为用户 {user_id} 触发【{reminder_type}】提醒：{content}")
+
+                            # 检查是否为自动复盘触发器
+                            if content.startswith('__AUTO_DAILY_REVIEW__'):
+                                group_name = content.replace('__AUTO_DAILY_REVIEW__', '')
+                                logger.info(f"检测到自动复盘触发器，开始为群组 {group_name} 执行自动复盘")
+                                trigger_daily_review(group_name)
+                                continue
 
                             # 修改：不再直接调用API，而是将提醒添加到消息队列
                             try:
@@ -4172,6 +4686,10 @@ def main():
         core_memory_dir = os.path.join(root_dir, CORE_MEMORY_DIR)
         os.makedirs(core_memory_dir, exist_ok=True)
 
+        # 初始化新功能数据库
+        logger.info("正在初始化文件收藏和任务管理数据库...")
+        init_database()
+
         # 加载聊天上下文
         logger.info("正在加载聊天上下文...")
         load_chat_contexts() # 调用加载函数
@@ -4180,6 +4698,8 @@ def main():
              logger.info("提醒功能已启用。")
              # 加载已保存的提醒 (包括重复和长期一次性)
              load_recurring_reminders()
+             # 设置每日复盘提醒
+             setup_daily_review_reminders()
              if not isinstance(ALLOW_REMINDERS_IN_QUIET_TIME, bool):
                   logger.warning("配置项 ALLOW_REMINDERS_IN_QUIET_TIME 的值不是布尔类型 (True/False)，可能导致意外行为。")
         else:
